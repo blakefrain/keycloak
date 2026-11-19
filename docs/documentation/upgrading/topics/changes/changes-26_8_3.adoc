@@ -4,6 +4,11 @@
 Breaking changes are identified as those that might require changes for existing users to their configurations or applications.
 In minor or patch releases, {project_name} will only introduce breaking changes to fix bugs.
 
+=== PAR metadata omitted when PAR is disabled
+
+When the `par` feature is disabled, OpenID Connect discovery now omits `pushed_authorization_request_endpoint` from both the top-level metadata and `mtls_endpoint_aliases`, and omits `require_pushed_authorization_requests`.
+Clients must tolerate these absent properties. Enable the `par` feature if clients require PAR.
+
 === Validation of client URI fields
 // https://github.com/keycloak/keycloak/issues/54046
 
@@ -97,6 +102,15 @@ Previously, any caller allowed to view the group received all of its role mappin
 For example, an administrator with only the `view-users` role no longer receives them, while an administrator with the `manage-users` role still does.
 If an integration reads group role mappings through this endpoint, make sure its account is allowed to view the roles, for example through the `view-realm` and `view-clients` roles or the corresponding fine-grained permissions.
 
+=== Kerberos password authentication accepts only allowed realms
+// https://github.com/keycloak/keycloak/issues/54271
+
+Username and password authentication through the Kerberos and LDAP user storage providers now accepts only the configured Kerberos realm and the realms listed in the new Allowed Kerberos realms option of the provider.
+A login with any other realm fails as for an unknown user.
+If users from a realm with a cross-realm trust log in with a username and password, add that realm to Allowed Kerberos realms after the upgrade.
+For the LDAP provider the realm comes from the Kerberos principal attribute of the user, so list every realm found there, for example the child domains of an Active Directory forest.
+SPNEGO authentication is not affected.
+
 // ------------------------ Notable changes ------------------------ //
 == Notable changes
 
@@ -162,6 +176,50 @@ The Redirect URL configured on an organization is now validated against the vali
 Previously, the Redirect URL was used without validation, which could allow an open redirect. After upgrading, if your organization has a custom Redirect URL pointing to your application, you must add that URL to the `account` client's *Valid Redirect URIs*. Otherwise, the redirect will silently fall back to the account console. This does not apply to invitations sent with a custom client, which always use the client's own base URL.
 
 The `invite-existing-user` endpoint now also accepts an optional `client_id` query parameter, the same way `invite-user` already does. If omitted, both endpoints default to the `account` client.
+
+=== SAML assertions with a OneTimeUse condition are no longer replayable
+// https://github.com/keycloak/keycloak/issues/46325
+
+When {project_name} acts as a SAML service provider through identity brokering, an assertion that contains a `OneTimeUse` condition is now accepted only once.
+Previously, the condition was parsed but not enforced, so the same assertion could be presented again within its validity period.
+
+After upgrading, a replayed assertion is rejected with an error page and an `IDENTITY_PROVIDER_RESPONSE_ERROR` event, and the user is not logged in.
+The event has a plain-text `reason` detail that explains why the assertion was rejected, for example that it was already used or that it exceeds the maximum age.
+This affects only identity providers that include the condition in their assertions, including a {project_name} realm acting as the identity provider when the *Include OneTimeUse Condition* option is enabled on the SAML client.
+Assertions without the condition are not affected.
+The new *OneTimeUse maximum age* setting of the SAML identity provider defaults to 1 hour (3,600 seconds).
+Assertions with a `OneTimeUse` condition that are older than this are rejected.
+Increase the setting if users need more time to complete a login with such an assertion.
+
+=== Backslashes are escaped in `jboss-logging` event messages
+// https://github.com/keycloak/keycloak/issues/54917
+
+The `jboss-logging` event listener now escapes the backslash character in quoted values as `\\`, in the same way as it already escapes the quote character.
+Previously, a value ending in `\"`, such as a user name sent in a failed login request, was logged as `\\"`.
+Log parsers that interpret backslash escapes read this as the end of the value and read the rest of it as additional fields, so an unauthenticated request could forge fields such as `type` or `userId` in the parsed event.
+After upgrading, a value such as the user name `DOMAIN\alice` is logged as `username="DOMAIN\\alice"` instead of `username="DOMAIN\alice"`.
+Log parsers that interpret backslash escapes still read the original value and need no change.
+Log parsers that match on the exact logged text must be updated to expect the doubled backslash.
+The change does not apply when the listener is configured with `--spi-events-listener--jboss-logging--quotes=none` or `--spi-events-listener--jboss-logging--sanitize=false`.
+
+=== OIDC identity provider now respects `email_verified=false` from the ID token when Trust Email is enabled
+// https://github.com/keycloak/keycloak/issues/54245
+
+When brokering through an OpenID Connect identity provider with *Trust Email* enabled, {project_name} now correctly honors an `email_verified=false` claim in the ID token, even when the UserInfo endpoint does not include an `email_verified` field.
+
+Previously, if a provider such as GitLab supplied `email_verified=false` in the ID token but omitted the claim from UserInfo, {project_name} ignored the token value and fell back to the `trustEmail` setting, marking the email as verified despite the IdP explicitly stating otherwise.
+
+After upgrading, the following behavior applies when *Trust Email* is enabled:
+
+* If UserInfo includes `email_verified`, that value is used and the ID token value is ignored.
+* If UserInfo provides an email but omits `email_verified`, the ID token's `email_verified` value is used, provided the two emails match.
+* If UserInfo returns a different email than the ID token, the ID token's `email_verified` claim is discarded because it does not apply to the email that was actually selected. {project_name} falls back to the default trust-email behavior for that email.
+* If a custom provider stores the validated ID token under `VALIDATED_ID_TOKEN` in the brokered identity context but does not explicitly set an `EMAIL_VERIFIED` context entry, {project_name} reads `email_verified` directly from the token as a fallback, again only when the token and context emails match.
+
+The change affects existing users under FORCE synchronization mode. When UserInfo provides the user's email but omits `email_verified`, {project_name} now applies the ID token's `email_verified` value, whether `true` or `false`, on every login, even if the user's email address has not changed since the last login.
+For example, if an administrator marked the user's email as not verified, a later login whose ID token carries `email_verified=true` sets the flag back to `true`. Conversely, a token carrying `email_verified=false` sets it to `false` even if the administrator marked the email as verified.
+Previously, the flag was left unchanged for existing users with an unchanged address in this situation.
+If this behavior is not desired, set *Trust Email* to *OFF* for that identity provider. {project_name} then leaves the flag unchanged for existing users whose email address has not changed, and sets it to `false` for new users until the email is verified locally.
 
 // ------------------------ Deprecated features ------------------------ //
 == Deprecated features
